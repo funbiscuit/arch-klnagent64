@@ -1,0 +1,247 @@
+pre_install() {
+	VER_NEW=15.1.0.11795
+	APP_NAME='klnagent64'
+	APP_EXEC_FILE='/opt/kaspersky/klnagent/sbin'
+	exec_file="$APP_EXEC_FILE/$APP_NAME"
+	APP_SETUP="/var/opt/kaspersky/applications.setup"
+
+	# Check for downgrade
+	if [ -e $APP_SETUP ]; then
+		VER_OLD=$(awk '/\[1103\]/{x=NR+100}(NR<=x){print}' $APP_SETUP | awk '/VERSION=/' | awk 'NR == 1' | grep -oP '(?<=VERSION=).*')
+		if [ x"$VER_OLD" != x ]; then
+			echo "Installed version is $VER_OLD"
+			YOUNGER_VER=$(printf "$VER_NEW\n$VER_OLD" | sort -V | awk 'NR == 1')
+			if [ "$YOUNGER_VER" = "$VER_NEW" ] && [ "$VER_OLD" != "$VER_NEW" ]; then
+				echo "*************************************************"
+				echo "Downgrade is prohibited: new version is $VER_NEW."
+				echo "*************************************************"
+				exit 1
+			fi
+		fi
+	fi
+
+	PERLPATH=`which perl 2>/dev/null`
+	if [ $? = "127" ]; then
+		echo "No 'which' utility. Installation aborted."
+	    exit 1
+	fi
+	if [ -z "$PERLPATH" ]; then
+		echo "Perl not found. Installation aborted."
+		exit 1
+	fi
+	if ! perl -e 'require 5.0' 2>/dev/null; then
+		echo "Perl 5.0 or greater required. Installation aborted."
+		exit 1
+	fi
+
+	if [ "$(uname -m | grep '64')" = "" ]; then
+		echo "Machine with 64 bit processor required. Installation aborted."
+		exit 1
+	fi
+
+	# check if executed under non-zero mandatory label
+	if command -v pdp-id > /dev/null 2>&1; then
+		if [ "$(pdp-id -l)" != "0" ] || [ "$(pdp-id -c)" != "0x0" ]; then
+			echo "Installation from a non-zero mandatory label is prohibited. Installation aborted."
+			exit 1
+		fi
+	fi
+
+
+
+}
+
+post_install() {
+
+	acquire_initdir()
+	{
+	    for dir in /etc/rc.d /etc /usr/bin/rc.d /sbin; do
+	        if [ -d "$dir/rc3.d" -o -h "$dir/rc3.d" ]; then
+	            if [ -z "$rcdir" ]; then
+	                rcdir="$dir"
+	            fi
+	        fi
+	    done
+
+	    if [ -n "$rcdir" ]; then
+	        initdir="$rcdir"
+	        if [ -d "$rcdir/init.d" ]; then
+	            initdir="$rcdir/init.d"
+	        fi
+	    fi
+	}
+
+	copy_initd_files()
+	{
+	    if [ -n "$initdir" ]; then
+	        /usr/bin/cp -p --remove-destination "/opt/kaspersky/klnagent64/lib/bin/klnagent64" "$initdir/klnagent64"
+	    else
+	        echo "Failed to find init.d directory" || exit 1
+	    fi
+	}
+
+	remove_initd_link()
+	{
+	    echo "Removing $initdir/klnagent64"
+		# remove file
+		rm -f "$initdir/klnagent64"
+	}
+
+	register_service_in_initd_deb()
+	{
+	    acquire_initdir
+
+	    echo "Add init.d service klnagent64"
+	    copy_initd_files
+
+	    INSSERV=
+	    for p in /sbin /usr/lib/insserv ; do
+	        tst_exe=$p/insserv
+	        if [ -x "$tst_exe" ] ; then
+	            INSSERV=$tst_exe
+	            break
+	        fi
+	    done
+
+	    if [ -n "$INSSERV" ] ; then
+	        # If system suports insserv it ignores runlevel settings and manages boot using LSB header.
+	        # More, update-rc.d produces warning if we don't use such syntax
+	        update-rc.d klnagent64 defaults >/dev/null
+	    else
+	        update-rc.d klnagent64 start 50 2 3 4 5 . stop 30 0 1 6 . >/dev/null
+	    fi
+	}
+
+	unregister_service_from_initd_deb()
+	{
+	    acquire_initdir
+
+	    # checking for registration via /etc/init.d
+	    if [ -n "$initdir" ] && [ -f "$initdir/klnagent64" ]; then
+	        update-rc.d -f klnagent64 remove >/dev/null
+	        # finally, remove init.d link
+	        remove_initd_link
+	    fi
+	}
+
+	register_service_in_initd_rpm()
+	{
+	    acquire_initdir
+
+	    echo "Add init.d service klnagent64"
+	    copy_initd_files
+
+	    /usr/bin/chkconfig --add klnagent64
+	}
+
+	unregister_service_from_initd_rpm()
+	{
+	    acquire_initdir
+
+	    # checking for registration via /etc/init.d
+	    if [ -n "$initdir" ] && [ -f "$initdir/klnagent64" ]; then
+	        /usr/bin/chkconfig --del klnagent64
+	        # finally, remove init.d link
+	        remove_initd_link
+	    fi
+	}
+
+	INITPROC=$(ps -o comm= -p 1)
+	opts=""
+
+	if [ "$1" = 'upgrade' ] ; then
+	    opts="$opts --upgrade"
+	fi
+
+	if [ "$1" = 'configure' ] ; then
+	    upgrade=""
+	    if [ -n "$2" ] ; then # upgrade
+	        # remove scripts from init.d if systemd is exist
+	        if [ "$INITPROC" = "systemd" ]; then
+	            unregister_service_from_initd_deb
+	        fi
+			upgrade="--upgrade"
+	    else # clean installation
+	        if [ "$INITPROC" != "systemd" ]; then
+	            register_service_in_initd_deb
+	        fi
+	    fi
+	fi
+
+
+}
+
+pre_upgrade() {
+	pre_install
+}
+
+post_upgrade() {
+	post_install
+}
+
+pre_remove() {
+
+	acquire_initdir()
+	{
+	    for dir in /etc/rc.d /etc /usr/bin/rc.d /sbin; do
+	        if [ -d "$dir/rc3.d" -o -h "$dir/rc3.d" ]; then
+	            if [ -z "$rcdir" ]; then
+	                rcdir="$dir"
+	            fi
+	        fi
+	    done
+
+	    if [ -n "$rcdir" ]; then
+	        initdir="$rcdir"
+	        if [ -d "$rcdir/init.d" ]; then
+	            initdir="$rcdir/init.d"
+	        fi
+	    fi
+	}
+
+	{
+	    echo "Removing $initdir/klnagent64"
+		# remove file
+		rm -f "$initdir/klnagent64"
+	}
+
+	unregister_service_from_initd_deb()
+	{
+	    acquire_initdir
+
+	    # checking for registration via /etc/init.d
+	    if [ -n "$initdir" ] && [ -f "$initdir/klnagent64" ]; then
+	        update-rc.d -f klnagent64 remove >/dev/null
+	        # finally, remove init.d link
+	        remove_initd_link
+	    fi
+	}
+
+	unregister_service_from_initd_rpm()
+	{
+	    acquire_initdir
+
+	    # checking for registration via /etc/init.d
+	    if [ -n "$initdir" ] && [ -f "$initdir/klnagent64" ]; then
+	        /usr/bin/chkconfig --del klnagent64
+	        # finally, remove init.d link
+	        remove_initd_link
+	    fi
+	}
+
+	INITPROC=$(ps -o comm= -p 1)
+	opts=""
+
+	if [ "$1" = 'upgrade' ] ; then
+	    opts="$opts --upgrade"
+	fi
+
+	perl /opt/kaspersky/klnagent64/lib/bin/setup/uninstall.pl deb $opts
+
+	uninstall_ret_code=$?
+
+	if [ "$INITPROC" != "systemd" ]; then
+		unregister_service_from_initd_deb
+	fi
+
+}
