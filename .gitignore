@@ -1,0 +1,8 @@
+/.idea
+/.vscode
+/dl.url
+*.deb
+*.zst
+src/*
+pkg/*
+*.sig
